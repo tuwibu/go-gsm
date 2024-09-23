@@ -1,7 +1,7 @@
 package gsm
 
 import (
-	"log"
+	"go-gsm/pkg/logrus"
 	"regexp"
 	"strings"
 )
@@ -17,21 +17,22 @@ func NewUSSDObserver(subject *SerialSubject) *USSDObserver {
 }
 
 func (u *USSDObserver) isUSSDResponse(data string) bool {
-	return strings.Index(data, "+CUSD:") != -1
+	return strings.Contains(data, "+CUSD:")
 }
 
 func (u *USSDObserver) Update(data string) {
-	if u.isUSSDResponse(data) == false {
+	if !u.isUSSDResponse(data) {
 		return
 	}
 	var re = regexp.MustCompile(`(?m)(?s)\+CUSD: [01],"(.*?)"`)
 	match := re.FindStringSubmatch(data)
-	isSuccess := strings.Index(data, "+CUSD: 1") != -1
 	if len(match) > 1 {
-		if isSuccess {
-			log.Println("USSD response:", match[1])
-		} else {
-			log.Fatal("USSD response:", match[1])
+		content := match[1]
+		var rePhone = regexp.MustCompile(`(?m)(\d{10,}|\+84\d{9})`)
+		matchPhone := rePhone.FindStringSubmatch(content)
+		if len(matchPhone) > 1 {
+			u.SerialSubject.phone = matchPhone[1]
 		}
+		logrus.LogrusLoggerWithContext(u.SerialSubject.ctx).Infof("USSD response: %s", content)
 	}
 }

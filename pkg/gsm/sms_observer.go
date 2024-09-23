@@ -3,7 +3,7 @@ package gsm
 import (
 	"encoding/hex"
 	"fmt"
-	"log"
+	"go-gsm/pkg/logrus"
 	"regexp"
 	"strings"
 	"unicode/utf16"
@@ -25,7 +25,13 @@ func NewSMSObserver(subject *SerialSubject) *SMSObserver {
 
 func (s *SMSObserver) isSMSResponse(data string) bool {
 	//+CMTI: "ME",160 || +CMGR: "REC UNREAD","123",,"24/09/22,03:20:17+28"
-	return strings.Contains(data, "+CMTI:") || strings.Contains(data, "+CMGR:")
+	allows := []string{"+CMTI:", "+CMGR:"}
+	for _, allow := range allows {
+		if strings.Contains(data, allow) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *SMSObserver) isNotify(data string) bool {
@@ -51,7 +57,7 @@ func (s *SMSObserver) processNextSMS() {
 	s.queue = s.queue[1:]
 
 	if err := s.SerialSubject.Send(fmt.Sprintf("AT+CMGR=%s", index)); err != nil {
-		fmt.Println("Error reading SMS:", err)
+		logrus.LogrusLoggerWithContext(s.SerialSubject.ctx).Errorf("Error reading SMS: %v", err)
 	} else {
 		s.isReading = true
 	}
@@ -70,7 +76,7 @@ func (s *SMSObserver) readSMS(data string) {
 	}
 	sender := match[1]
 	time := match[2]
-	log.Printf("SMS from %s at %s: %s\n", sender, time, decode)
+	logrus.LogrusLoggerWithContext(s.SerialSubject.ctx).Infof("SMS from %s at %s: %s", sender, time, content)
 	s.isReading = false
 	s.processNextSMS()
 }
