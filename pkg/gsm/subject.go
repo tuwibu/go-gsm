@@ -21,10 +21,12 @@ type SerialSubject struct {
 	port      serial.Port
 	buffer    string
 	phone     string
+	network   string
 	ccid      string
 	signal    int
 	channels  map[string]chan string
 	skipList  []string
+	cusd      string
 }
 
 // GetAvailablePorts returns a list of available serial ports
@@ -58,6 +60,7 @@ func NewSerial(ctx *context.Context, port serial.Port) *SerialSubject {
 		buffer:    "",
 		channels:  make(map[string]chan string),
 		skipList:  skipList,
+		cusd:      "",
 	}
 }
 
@@ -78,13 +81,11 @@ func (s *SerialSubject) notify(data string) {
 }
 
 func (s *SerialSubject) Open() error {
-	s.attach(NewUSSDObserver(s))
 	s.attach(NewSMSObserver(s))
 	s.attach(NewCallObserver(s))
 	s.attach(NewInfoObserver(s))
 	go s.read()
 	// Enable error messages
-	timeout := 5 * time.Second
 	_ = s.SendAndWaitOK("AT+CMEE=2")
 	// Set the modem to text mode
 	_ = s.SendAndWaitOK("AT+CMGF=1")
@@ -92,12 +93,30 @@ func (s *SerialSubject) Open() error {
 	_ = s.SendAndWaitOK("AT+CNMI=2,2,0,0,0")
 	// Enable caller ID
 	_ = s.SendAndWaitOK("AT+CLIP=1")
+	// Get ICCID
+	ccid, errCCID := s.SendAndGetData("+CCID", "AT+CCID", 5*time.Second)
+	if errCCID != nil {
+		logrus.LogrusLoggerWithContext(s.ctx).Error(errCCID)
+	}
+	s.ccid = ccid
 	// Get phone service
-	cops, errCops := s.SendAndGetData("+COPS", "AT+COPS?", timeout)
+	cops, errCops := s.SendAndGetData("+COPS", "AT+COPS?", 5*time.Second)
 	if errCops != nil {
 		logrus.LogrusLoggerWithContext(s.ctx).Error(errCops)
 	}
+	network := extractNetwork(cops)
 	logrus.LogrusLoggerWithContext(s.ctx).Infof("COPS: %s", cops)
+	logrus.LogrusLoggerWithContext(s.ctx).Infof("Network: %s", network)
+	ussd := "*101#"
+	if network == "Vietnamobile" {
+		ussd = "*101#"
+	}
+	logrus.LogrusLoggerWithContext(s.ctx).Infof("USSD: %s", ussd)
+	cusd, errCUSD := s.SendUSSD(ussd)
+	if errCUSD != nil {
+		logrus.LogrusLoggerWithContext(s.ctx).Error(errCUSD)
+	}
+	logrus.LogrusLoggerWithContext(s.ctx).Infof("CUSD: %s", cusd)
 	return nil
 }
 
@@ -122,12 +141,14 @@ func (s *SerialSubject) read() {
 			if idx := strings.Index(s.buffer, "\r\n"); idx != -1 {
 				message := s.buffer[:idx]
 				s.buffer = s.buffer[idx+2:]
-				//logrus.LogrusLoggerWithContext(s.ctx).Debugf("Received: %s", message)
+				logrus.LogrusLoggerWithContext(s.ctx).Debugf("Received: %s", message)
 				if message == "" {
 					continue
 				}
 				if message == "OK" {
-					s.channels["OK"] <- message
+					if _, ok := s.channels["OK"]; ok {
+						s.channels["OK"] <- message
+					}
 					continue
 				}
 				isSkip := false
@@ -138,16 +159,37 @@ func (s *SerialSubject) read() {
 					}
 				}
 				if isSkip {
+					logrus.LogrusLoggerWithContext(s.ctx).Debugf("Skipped: %s", message)
 					continue
 				}
 				// check if message is response to channel
-				keys := s.getAllWaitKey()
+				keys := s.getWaitKeys()
 				for _, key := range keys {
 					if strings.HasPrefix(message, key) {
 						//logrus.LogrusLoggerWithContext(s.ctx).Debugf("Sent to %s channel: %s", key, message)
 						s.channels[key] <- message
 						continue
 					}
+				}
+				if strings.HasPrefix(message, "+CUSD:") {
+					firstIndex := strings.Index(message, "\"")
+					lastIndex := strings.LastIndex(message, "\"")
+					if firstIndex == lastIndex {
+						s.cusd = message[firstIndex+1:] + "\n"
+						continue
+					}
+					s.cusd = message[firstIndex+1:lastIndex] + "\n"
+					continue
+				}
+				if s.cusd != "" {
+					index := strings.Index(message, "\"")
+					if index != -1 {
+						s.cusd += message[:index]
+						s.channels["USSD"] <- strings.TrimSpace(s.cusd)
+						s.cusd = ""
+						continue
+					}
+					s.cusd += message + "\n"
 				}
 				s.notify(message)
 			} else {
@@ -168,7 +210,6 @@ func (s *SerialSubject) Close() error {
 
 // SendAndWaitOK sends a message to the serial port and waits for a response
 func (s *SerialSubject) SendAndWaitOK(command string) error {
-	timeout := 5 * time.Second
 	err := s.Send(command)
 	if err != nil {
 		return err
@@ -179,8 +220,10 @@ func (s *SerialSubject) SendAndWaitOK(command string) error {
 
 	select {
 	case <-s.channels["OK"]:
+		delete(s.channels, "OK")
 		return nil
-	case <-time.After(timeout):
+	case <-time.After(1 * time.Second):
+		delete(s.channels, "OK")
 		return fmt.Errorf("timeout waiting for OK response")
 	}
 }
@@ -204,6 +247,7 @@ func (s *SerialSubject) SendAndGetData(key string, command string, timeout time.
 
 // Send sends a message to the serial port
 func (s *SerialSubject) Send(command string) error {
+	logrus.LogrusLoggerWithContext(s.ctx).Warnf("Sending: %s", command)
 	_, errWrite := s.port.Write([]byte(fmt.Sprintf("%s\r\n", command)))
 	if errWrite != nil {
 		return errWrite
@@ -211,7 +255,25 @@ func (s *SerialSubject) Send(command string) error {
 	return nil
 }
 
-func (s *SerialSubject) getAllWaitKey() []string {
+func (s *SerialSubject) SendUSSD(ussd string) (string, error) {
+	err := s.Send(fmt.Sprintf("AT+CUSD=1,\"%s\",15", ussd))
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	s.channels["USSD"] = make(chan string, 1)
+	s.mu.Unlock()
+	time.Sleep(1 * time.Second)
+
+	select {
+	case response := <-s.channels["USSD"]:
+		return response, nil
+	case <-time.After(60 * time.Second):
+		return "", fmt.Errorf("timeout waiting for USSD response")
+	}
+}
+
+func (s *SerialSubject) getWaitKeys() []string {
 	keys := make([]string, 0)
 	s.mu.Lock()
 	for k := range s.channels {

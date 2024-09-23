@@ -24,7 +24,6 @@ func NewSMSObserver(subject *SerialSubject) *SMSObserver {
 }
 
 func (s *SMSObserver) isSMSResponse(data string) bool {
-	//+CMTI: "ME",160 || +CMGR: "REC UNREAD","123",,"24/09/22,03:20:17+28"
 	allows := []string{"+CMTI:", "+CMGR:"}
 	for _, allow := range allows {
 		if strings.Contains(data, allow) {
@@ -82,25 +81,19 @@ func (s *SMSObserver) readSMS(data string) {
 }
 
 func decodeUCS2(inputStr string) (string, error) {
-	// Thử giải mã chuỗi UCS2 từ hex
 	bytes, err := hex.DecodeString(inputStr)
 	if err != nil {
-		// Nếu không thể giải mã hex, trả về chuỗi gốc
 		return inputStr, nil
 	}
-
-	// Kiểm tra nếu độ dài byte không phải là bội số của 2, trả về chuỗi gốc
 	if len(bytes)%2 != 0 {
 		return inputStr, nil
 	}
 
-	// Chuyển đổi các byte thành chuỗi Unicode (UTF-16)
 	runes := make([]uint16, len(bytes)/2)
 	for i := 0; i < len(runes); i++ {
 		runes[i] = uint16(bytes[2*i])<<8 | uint16(bytes[2*i+1])
 	}
 
-	// Chuyển từ UCS2 thành UTF-16 và sau đó là chuỗi UTF-8
 	decoded := string(utf16.Decode(runes))
 	return decoded, nil
 }
