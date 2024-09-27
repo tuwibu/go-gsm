@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"go-gsm/pkg/gsm"
 	"go-gsm/pkg/logrus"
 )
@@ -14,13 +15,20 @@ func main() {
 		panic(errPorts)
 	}
 	logrus.LogrusLoggerWithContext(&ctx).Debugf("Available ports: %v", ports)
-	// COM32, COM21
-	port, errPort := gsm.CreatePort("COM32", 115200)
+	// COM32, COM21, COM20
+	portName := "COM32"
+	port, errPort := gsm.CreatePort(portName, 115200)
 	if errPort != nil {
 		panic(errPort)
 	}
-	serial := gsm.NewSerial(&ctx, port)
+	serial := gsm.NewSerial(&ctx, port, "ccc")
 	if err := serial.Open(); err != nil {
+		panic(err)
+	}
+	//if err := serial.Send("AT+QFLST"); err != nil {
+	//	panic(err)
+	//}
+	if err := serial.Send(fmt.Sprintf("AT+QFDWL=\"%s.wav\";\r", "ccc")); err != nil {
 		panic(err)
 	}
 	forever := make(chan struct{})

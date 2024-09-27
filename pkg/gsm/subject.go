@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go-gsm/pkg/logrus"
 	"go.bug.st/serial"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ type SerialSubject struct {
 	observers []SerialObserver
 	mu        sync.RWMutex
 	port      serial.Port
+	portName  string
 	buffer    string
 	phone     string
 	network   string
@@ -27,6 +29,7 @@ type SerialSubject struct {
 	channels  map[string]chan string
 	skipList  []string
 	cusd      string
+	wavBuffer []byte
 }
 
 // GetAvailablePorts returns a list of available serial ports
@@ -46,21 +49,24 @@ func CreatePort(portName string, baudRate int) (serial.Port, error) {
 	return port, errOpen
 }
 
-func NewSerial(ctx *context.Context, port serial.Port) *SerialSubject {
+func NewSerial(ctx *context.Context, port serial.Port, portName string) *SerialSubject {
 	skipList := []string{
 		"AT",
 		"OK",
 		"+CREG",
+		"CONNECT",
 	}
 	return &SerialSubject{
 		ctx:       ctx,
 		observers: make([]SerialObserver, 0),
 		mu:        sync.RWMutex{},
 		port:      port,
+		portName:  portName,
 		buffer:    "",
 		channels:  make(map[string]chan string),
 		skipList:  skipList,
 		cusd:      "",
+		wavBuffer: nil,
 	}
 }
 
@@ -93,6 +99,8 @@ func (s *SerialSubject) Open() error {
 	_ = s.SendAndWaitOK("AT+CNMI=2,2,0,0,0")
 	// Enable caller ID
 	_ = s.SendAndWaitOK("AT+CLIP=1")
+	// Delete all files in the file system
+	//_ = s.SendAndWaitOK("AT+QFDEL=\"*\"")
 	// Get ICCID
 	ccid, errCCID := s.SendAndGetData("+CCID", "AT+CCID", 5*time.Second)
 	if errCCID != nil {
@@ -108,10 +116,9 @@ func (s *SerialSubject) Open() error {
 	logrus.LogrusLoggerWithContext(s.ctx).Infof("COPS: %s", cops)
 	logrus.LogrusLoggerWithContext(s.ctx).Infof("Network: %s", network)
 	ussd := "*101#"
-	if network == "Vietnamobile" {
-		ussd = "*101#"
+	if network == "Vinaphone" {
+		ussd = "*111#"
 	}
-	logrus.LogrusLoggerWithContext(s.ctx).Infof("USSD: %s", ussd)
 	cusd, errCUSD := s.SendUSSD(ussd)
 	if errCUSD != nil {
 		logrus.LogrusLoggerWithContext(s.ctx).Error(errCUSD)
@@ -141,16 +148,46 @@ func (s *SerialSubject) read() {
 			if idx := strings.Index(s.buffer, "\r\n"); idx != -1 {
 				message := s.buffer[:idx]
 				s.buffer = s.buffer[idx+2:]
-				logrus.LogrusLoggerWithContext(s.ctx).Debugf("Received: %s", message)
 				if message == "" {
 					continue
 				}
+				if s.wavBuffer == nil && strings.HasPrefix(message, "RIFF") {
+					// Nếu chưa có buffer và thông điệp bắt đầu bằng "RIFF"
+					i := strings.Index(message, "RIFF")
+					s.wavBuffer = []byte(message[i:])
+					continue
+				}
+
+				if s.wavBuffer != nil {
+					// Nếu đã có buffer, kiểm tra chuỗi "+QFDWL"
+					i := strings.Index(message, "+QFDWL")
+					if i != -1 {
+						// Nối phần tin nhắn có "+QFDWL" vào buffer
+						s.wavBuffer = append(s.wavBuffer, []byte(message[i:])...)
+						logrus.LogrusLoggerWithContext(s.ctx).Info("Received WAV file")
+
+						// Ghi file WAV
+						if errWrite := os.WriteFile(fmt.Sprintf("%s.wav", s.portName), s.wavBuffer, 0644); errWrite != nil {
+							logrus.LogrusLoggerWithContext(s.ctx).Errorf("Error writing WAV file: %v", errWrite)
+						}
+
+						// Xóa buffer sau khi ghi xong
+						s.wavBuffer = nil
+						continue
+					} else {
+						// Nếu không tìm thấy "+QFDWL", tiếp tục nối dữ liệu vào buffer
+						s.wavBuffer = append(s.wavBuffer, []byte(message)...)
+						continue
+					}
+				}
+
 				if message == "OK" {
 					if _, ok := s.channels["OK"]; ok {
 						s.channels["OK"] <- message
 					}
 					continue
 				}
+				logrus.LogrusLoggerWithContext(s.ctx).Debugf("Received: %s", message)
 				isSkip := false
 				for _, skip := range s.skipList {
 					if strings.HasPrefix(message, skip) {
@@ -177,9 +214,12 @@ func (s *SerialSubject) read() {
 					if firstIndex == lastIndex {
 						s.cusd = message[firstIndex+1:] + "\n"
 						continue
+					} else {
+						s.cusd = message[firstIndex+1:lastIndex] + "\n"
+						s.channels["USSD"] <- strings.TrimSpace(s.cusd)
+						s.cusd = ""
+						continue
 					}
-					s.cusd = message[firstIndex+1:lastIndex] + "\n"
-					continue
 				}
 				if s.cusd != "" {
 					index := strings.Index(message, "\"")

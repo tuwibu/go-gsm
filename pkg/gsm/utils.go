@@ -1,11 +1,16 @@
 package gsm
 
-import "strings"
+import (
+	"strings"
+)
 
 func extractNetwork(cops string) string {
 	// Filter network name
 	start := strings.Index(cops, "\"")
 	end := strings.LastIndex(cops, "\"")
+	if start == -1 || end == -1 {
+		return "Unknown"
+	}
 	network := strings.ToLower(strings.TrimSpace(cops[start+1 : end]))
 	if strings.Contains(network, "vietnamobile") {
 		network = "Vietnamobile"
