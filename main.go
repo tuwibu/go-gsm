@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"go-gsm/pkg/gsm"
 	"go-gsm/pkg/logrus"
 )
@@ -23,12 +22,6 @@ func main() {
 	}
 	serial := gsm.NewSerial(&ctx, port, "ccc")
 	if err := serial.Open(); err != nil {
-		panic(err)
-	}
-	//if err := serial.Send("AT+QFLST"); err != nil {
-	//	panic(err)
-	//}
-	if err := serial.Send(fmt.Sprintf("AT+QFDWL=\"%s.wav\";\r", "ccc")); err != nil {
 		panic(err)
 	}
 	forever := make(chan struct{})
